@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: Foody
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free  # change to starter or higher for production
+    autoDeploy: true
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: NEO4J_PASSWORD
+        sync: false
+      - key: REDIS_PASSWORD
+        sync: false
+      - key: PYTHONPATH
+        value: /app
+      - key: PORT
+        value: "8000"
+    healthCheckPath: /
