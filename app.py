@@ -1,5 +1,5 @@
 import os
-from turtle import pd
+import pandas as pd
 from fastapi import FastAPI, Body, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -18,7 +18,6 @@ from typing_extensions import TypedDict
 from dotenv import load_dotenv
 from contextlib import contextmanager
 import logging
-
 # ====================================================
 # --- Configure Logging ---
 # ====================================================

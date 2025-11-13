@@ -7,4 +7,3 @@ redis
 python-dotenv
 typing-extensions
 pandas
-turtle
