@@ -60,7 +60,7 @@ try:
         temperature=0.3,
         streaming=False,
     )
-
+    
     # Streaming LLM for final responses
     llm_streaming = ChatGroq(
         model="llama-3.3-70b-versatile",
@@ -114,14 +114,11 @@ except Exception as e:
 # --- Authentication Helpers ---
 # ====================================================
 
-
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
-
 def generate_access_token(user_id: str) -> str:
     return secrets.token_urlsafe(32)
-
 
 def store_user_credentials(email: str, password: str, user_id: str):
     try:
@@ -142,7 +139,6 @@ def store_user_credentials(email: str, password: str, user_id: str):
         logger.error(f"❌ Failed to store credentials: {e}")
         return False
 
-
 def get_user_by_email(email: str) -> Optional[Dict]:
     try:
         user_json = redis_client.get(f"user:email:{email}")
@@ -152,7 +148,6 @@ def get_user_by_email(email: str) -> Optional[Dict]:
         logger.error(f"❌ Failed to get user by email: {e}")
     return None
 
-
 def verify_password(email: str, password: str) -> Optional[str]:
     user_data = get_user_by_email(email)
     if not user_data:
@@ -161,7 +156,6 @@ def verify_password(email: str, password: str) -> Optional[str]:
     if user_data["password"] == hashed_password:
         return user_data["user_id"]
     return None
-
 
 def store_access_token(user_id: str, access_token: str):
     try:
@@ -176,7 +170,6 @@ def store_access_token(user_id: str, access_token: str):
     except Exception as e:
         logger.error(f"❌ Failed to store access token: {e}")
 
-
 def verify_access_token(token: str) -> Optional[str]:
     try:
         token_json = redis_client.get(f"token:{token}")
@@ -189,7 +182,6 @@ def verify_access_token(token: str) -> Optional[str]:
         logger.error(f"❌ Failed to verify token: {e}")
     return None
 
-
 def revoke_access_token(user_id: str):
     try:
         token = redis_client.get(f"user:{user_id}:token")
@@ -198,7 +190,6 @@ def revoke_access_token(user_id: str):
             redis_client.delete(f"user:{user_id}:token")
     except Exception as e:
         logger.error(f"❌ Failed to revoke token: {e}")
-
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     token = credentials.credentials
@@ -215,7 +206,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 # --- Helper Functions ---
 # ====================================================
 
-
 def neo4j_to_json_serializable(obj):
     """Convert Neo4j types to JSON serializable types"""
     if isinstance(obj, DateTime):
@@ -227,7 +217,6 @@ def neo4j_to_json_serializable(obj):
     elif isinstance(obj, list):
         return [neo4j_to_json_serializable(item) for item in obj]
     return obj
-
 
 def safe_parse_json(text: str) -> dict:
     try:
@@ -241,7 +230,6 @@ def safe_parse_json(text: str) -> dict:
         logger.warning(f"⚠️ JSON parse failed: {e}")
         return {}
 
-
 def get_conversation_history(user_id: str) -> List[Dict[str, str]]:
     try:
         history_json = redis_client.get(f"user:{user_id}:history")
@@ -251,7 +239,6 @@ def get_conversation_history(user_id: str) -> List[Dict[str, str]]:
         logger.error(f"❌ Failed to get history: {e}")
     return []
 
-
 def save_conversation_history(user_id: str, history: List[Dict[str, str]]):
     try:
         trimmed_history = history[-50:]
@@ -259,7 +246,6 @@ def save_conversation_history(user_id: str, history: List[Dict[str, str]]):
                            86400 * 7, json.dumps(trimmed_history))
     except Exception as e:
         logger.error(f"❌ Failed to save history: {e}")
-
 
 def get_user_context(user_id: str) -> Dict:
     """Get user's contextual information"""
@@ -271,7 +257,6 @@ def get_user_context(user_id: str) -> Dict:
         logger.error(f"❌ Failed to get user context: {e}")
     return {"preferences": {}, "last_interaction": None, "current_task": None}
 
-
 def save_user_context(user_id: str, context: Dict):
     """Save user's contextual information"""
     try:
@@ -280,7 +265,6 @@ def save_user_context(user_id: str, context: Dict):
     except Exception as e:
         logger.error(f"❌ Failed to save user context: {e}")
 
-
 @contextmanager
 def get_neo4j_session():
     session = driver.session()
@@ -288,7 +272,6 @@ def get_neo4j_session():
         yield session
     finally:
         session.close()
-
 
 def execute_cypher_query(cypher_query: str, params: dict = None) -> List[Dict]:
     logger.info("🔍 EXECUTING CYPHER QUERY")
@@ -327,7 +310,6 @@ def execute_cypher_query(cypher_query: str, params: dict = None) -> List[Dict]:
 # --- Enhanced State Definition ---
 # ====================================================
 
-
 class State(TypedDict):
     input: str
     user_id: str
@@ -346,7 +328,6 @@ class State(TypedDict):
 # ====================================================
 # --- Node 1: Intent Classification & Routing ---
 # ====================================================
-
 
 def classify_intent(state: State) -> State:
     """
@@ -471,7 +452,6 @@ Be precise. Focus on the PRIMARY intent.
 # ====================================================
 # --- Node 2: Generate Query or Action ---
 # ====================================================
-
 
 def generate_query_or_action(state: State) -> State:
     """
@@ -604,7 +584,6 @@ Remember:
 # --- Node 3: Execute Query (Non-streaming part) ---
 # ====================================================
 
-
 def execute_query_only(state: State) -> State:
     """
     Execute query and prepare data (no response generation)
@@ -649,7 +628,6 @@ def execute_query_only(state: State) -> State:
 # ====================================================
 # --- Streaming Response Generator ---
 # ====================================================
-
 
 async def generate_streaming_response(state: State) -> AsyncGenerator[str, None]:
     """
@@ -750,7 +728,7 @@ Generate the response in plain text (no JSON):
 
     try:
         logger.info("🤖 Starting streaming LLM response...")
-
+        
         # Stream tokens from LLM
         full_response = ""
         async for chunk in llm_streaming.astream(prompt):
@@ -758,24 +736,21 @@ Generate the response in plain text (no JSON):
                 token = chunk.content
                 full_response += token
                 yield json.dumps({"type": "token", "content": token}) + "\n"
-
+        
         # Save to history
         state["output"] = full_response
         state["messages"].append({"role": "user", "content": user_input})
-        state["messages"].append(
-            {"role": "assistant", "content": full_response})
+        state["messages"].append({"role": "assistant", "content": full_response})
         save_conversation_history(state["user_id"], state["messages"])
-
-        logger.info(
-            f"✅ Streaming completed. Total length: {len(full_response)}")
+        
+        logger.info(f"✅ Streaming completed. Total length: {len(full_response)}")
         yield json.dumps({"type": "done"}) + "\n"
-
+        
     except Exception as e:
         logger.error(f"❌ Streaming response generation failed: {e}")
         error_message = "⚠️ I encountered an error while generating the response. Please try again."
         yield json.dumps({"type": "token", "content": error_message}) + "\n"
         yield json.dumps({"type": "error", "message": str(e)}) + "\n"
-
 
 def generate_general_response(state: State) -> str:
     """Generate response for general queries"""
@@ -808,7 +783,6 @@ Just ask naturally, and I'll assist you! 😊"""
 
     return "I'm here to help with your restaurant CRM needs. Could you tell me more about what you'd like to know or do?"
 
-
 def generate_no_results_response(state: State) -> str:
     """Generate response when no data is found"""
     intent_type = state["intent_type"]
@@ -836,14 +810,12 @@ Need help? Just ask! 😊"""
 # --- Graph Definition ---
 # ====================================================
 
-
 graph = StateGraph(State)
 graph.add_node("classify_intent", classify_intent)
 graph.add_node("generate_query_or_action", generate_query_or_action)
 graph.add_node("execute_query_only", execute_query_only)
 
 graph.set_entry_point("classify_intent")
-
 
 def should_generate_query(state: State) -> str:
     """Decide whether to generate query or skip to execution"""
@@ -866,7 +838,6 @@ def should_generate_query(state: State) -> str:
     logger.info(f"   ➡️ ROUTE: generate (needs query generation)")
     return "generate"
 
-
 graph.add_conditional_edges(
     "classify_intent",
     should_generate_query,
@@ -885,7 +856,6 @@ logger.info("✅ LangGraph workflow compiled successfully")
 # ====================================================
 # --- Authentication API Routes ---
 # ====================================================
-
 
 @app.post("/auth/register")
 async def register(email: str = Body(...), password: str = Body(...)):
@@ -913,7 +883,6 @@ async def register(email: str = Body(...), password: str = Body(...)):
         "token_type": "bearer"
     }
 
-
 @app.post("/auth/login")
 async def login(email: str = Body(...), password: str = Body(...)):
     if not email or not password:
@@ -934,7 +903,6 @@ async def login(email: str = Body(...), password: str = Body(...)):
         "token_type": "bearer"
     }
 
-
 @app.post("/auth/logout")
 async def logout(current_user: str = Depends(get_current_user)):
     revoke_access_token(current_user)
@@ -943,7 +911,6 @@ async def logout(current_user: str = Depends(get_current_user)):
 # ====================================================
 # --- Main Chat Endpoints (Streaming & Non-Streaming) ---
 # ====================================================
-
 
 @app.get("/")
 async def root():
@@ -957,7 +924,6 @@ async def root():
             "non_streaming": "/chat"
         }
     }
-
 
 @app.post("/chat/stream")
 async def chat_stream(
@@ -1008,7 +974,7 @@ async def chat_stream(
             # Execute non-streaming parts (intent classification & query execution)
             logger.info("🎬 Executing non-streaming workflow steps...")
             result = app_graph.invoke(state)
-
+            
             # Send metadata first
             metadata = {
                 "type": "metadata",
@@ -1020,7 +986,7 @@ async def chat_stream(
                 "action_type": result.get("action_type")
             }
             yield json.dumps(metadata) + "\n"
-
+            
             # Stream the response
             logger.info("🌊 Starting response streaming...")
             async for chunk in generate_streaming_response(result):
@@ -1045,7 +1011,6 @@ async def chat_stream(
             "X-Accel-Buffering": "no"  # Disable buffering for nginx
         }
     )
-
 
 @app.post("/chat")
 async def chat(
@@ -1086,7 +1051,7 @@ async def chat(
 
         # Execute workflow
         result = app_graph.invoke(state)
-
+        
         # Generate non-streaming response
         if not result.get("output"):
             # Generate response if not already set
@@ -1110,11 +1075,10 @@ You are a friendly, professional restaurant CRM assistant. Generate a natural re
 Generate a concise, helpful response.
 """
                 result["output"] = llm.invoke(prompt).content.strip()
-
+        
         # Save to history
         result["messages"].append({"role": "user", "content": message})
-        result["messages"].append(
-            {"role": "assistant", "content": result["output"]})
+        result["messages"].append({"role": "assistant", "content": result["output"]})
         save_conversation_history(current_user, result["messages"])
 
         query_results = result.get("query_results") or []
@@ -1138,12 +1102,10 @@ Generate a concise, helpful response.
         logger.error(f"❌ CHAT REQUEST FAILED: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.get("/chat/history")
 async def get_history(current_user: str = Depends(get_current_user)):
     history = get_conversation_history(current_user)
     return {"success": True, "history": history, "count": len(history)}
-
 
 @app.delete("/chat/history")
 async def clear_history(current_user: str = Depends(get_current_user)):
@@ -1152,9 +1114,260 @@ async def clear_history(current_user: str = Depends(get_current_user)):
     return {"success": True, "message": "History cleared"}
 
 # ====================================================
-# --- Frontend Data API Endpoints ---
+# --- Stats API Endpoints (for Dashboard) ---
 # ====================================================
 
+@app.get("/stats/overview")
+async def get_stats_overview(current_user: str = Depends(get_current_user)):
+    """Get overall restaurant statistics"""
+    try:
+        with get_neo4j_session() as session:
+            result = session.run("""
+                MATCH (d:Dish) WITH count(d) AS dishes
+                MATCH (c:Customer) WITH dishes, count(c) AS customers
+                MATCH (o:Order) WITH dishes, customers, count(o) AS orders
+                MATCH (r:Review) WITH dishes, customers, orders, count(r) AS reviews
+                MATCH (i:Ingredient) WITH dishes, customers, orders, reviews, count(i) AS ingredients
+                RETURN dishes, customers, orders, reviews, ingredients
+            """).single()
+
+            revenue_result = session.run("""
+                MATCH (o:Order)
+                RETURN SUM(o.total_amount) AS total_revenue,
+                       AVG(o.total_amount) AS avg_order_value,
+                       COUNT(o) AS total_orders
+            """).single()
+
+            rating_result = session.run("""
+                MATCH (r:Review)
+                RETURN AVG(r.rating) AS avg_rating,
+                       COUNT(r) AS total_reviews
+            """).single()
+
+        return {
+            "success": True,
+            "statistics": {
+                "total_dishes": result["dishes"] if result else 0,
+                "total_customers": result["customers"] if result else 0,
+                "total_orders": result["orders"] if result else 0,
+                "total_reviews": result["reviews"] if result else 0,
+                "total_ingredients": result["ingredients"] if result else 0,
+                "total_revenue": float(revenue_result["total_revenue"] or 0),
+                "avg_order_value": float(revenue_result["avg_order_value"] or 0),
+                "avg_rating": float(rating_result["avg_rating"] or 0)
+            }
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to get stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/revenue-trend")
+async def get_revenue_trend(
+    days: int = 7,
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get revenue trend for the specified number of days
+    
+    Query Parameters:
+    - days: Number of days to return data for (default: 7)
+    
+    Returns daily revenue with date, day name, and amount
+    """
+    try:
+        # Calculate date range
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+
+        with get_neo4j_session() as session:
+            result = session.run("""
+                MATCH (o:Order)
+                WHERE o.timestamp >= datetime($start_date) 
+                  AND o.timestamp <= datetime($end_date)
+                WITH date(o.timestamp) AS order_date, 
+                     SUM(o.total_amount) AS daily_revenue
+                RETURN toString(order_date) AS date, 
+                       daily_revenue
+                ORDER BY order_date ASC
+            """,
+                                 start_date=start_date.isoformat(),
+                                 end_date=end_date.isoformat()
+                                 )
+
+            records = [dict(record) for record in result]
+
+            # Format data with day names
+            formatted_data = []
+            total_revenue = 0
+
+            for record in records:
+                date_obj = datetime.fromisoformat(record['date'])
+                day_name = date_obj.strftime('%a')  # Mon, Tue, Wed, etc.
+                revenue = float(record['daily_revenue'])
+
+                formatted_data.append({
+                    "date": record['date'],
+                    "day": day_name,
+                    "revenue": revenue
+                })
+                total_revenue += revenue
+
+            # Calculate average
+            average_daily_revenue = total_revenue / \
+                len(formatted_data) if formatted_data else 0
+
+            return {
+                "success": True,
+                "data": formatted_data,
+                "total_revenue": round(total_revenue, 2),
+                "average_daily_revenue": round(average_daily_revenue, 2),
+                "days_count": len(formatted_data)
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get revenue trend: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/top-dishes")
+async def get_top_dishes(
+    limit: int = 5,
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get top dishes by order count
+    
+    Query Parameters:
+    - limit: Number of top dishes to return (default: 5)
+    
+    Returns dishes with order count, revenue, and ratings
+    """
+    try:
+        with get_neo4j_session() as session:
+            # Get top dishes with order counts and revenue
+            dishes_result = session.run("""
+                MATCH (o:Order)-[:CONTAINS]->(d:Dish)
+                WITH d, 
+                     COUNT(o) AS order_count,
+                     d.price * COUNT(o) AS estimated_revenue
+                RETURN d.name AS name,
+                       d.type AS type,
+                       d.cuisine AS cuisine,
+                       d.price AS price,
+                       order_count,
+                       estimated_revenue,
+                       d.popularity_score AS popularity
+                ORDER BY order_count DESC
+                LIMIT $limit
+            """, limit=limit)
+
+            dishes = [dict(record) for record in dishes_result]
+
+            # Get ratings for these dishes
+            formatted_data = []
+            total_dishes_sold = 0
+
+            for dish in dishes:
+                # Get average rating for this dish
+                rating_result = session.run("""
+                    MATCH (r:Review)-[:RATES]->(d:Dish {name: $dish_name})
+                    RETURN AVG(r.rating) AS avg_rating, COUNT(r) AS review_count
+                """, dish_name=dish['name']).single()
+
+                avg_rating = float(
+                    rating_result['avg_rating'] or 0) if rating_result else 0
+                order_count = int(dish['order_count'])
+                total_dishes_sold += order_count
+
+                formatted_data.append({
+                    "name": dish['name'],
+                    "type": dish['type'],
+                    "cuisine": dish['cuisine'],
+                    "price": float(dish['price']),
+                    "orders": order_count,
+                    "revenue": round(float(dish['estimated_revenue']), 2),
+                    "rating": round(avg_rating, 1),
+                    "popularity_score": int(dish['popularity']) if dish['popularity'] else 0
+                })
+
+            return {
+                "success": True,
+                "data": formatted_data,
+                "total_dishes_sold": total_dishes_sold,
+                "limit": limit
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get top dishes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/order-status")
+async def get_order_status_distribution(
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get order status distribution
+    
+    Returns counts and percentages for each order status
+    """
+    try:
+        with get_neo4j_session() as session:
+            result = session.run("""
+                MATCH (o:Order)
+                WITH o.status AS status, COUNT(o) AS count
+                WITH collect({status: status, count: count}) AS status_data,
+                     SUM(count) AS total
+                UNWIND status_data AS sd
+                RETURN sd.status AS status,
+                       sd.count AS count,
+                       total,
+                       round(toFloat(sd.count) / toFloat(total) * 100, 1) AS percentage
+                ORDER BY count DESC
+            """)
+
+            records = [dict(record) for record in result]
+
+            # Format data
+            data = {}
+            total_orders = 0
+
+            for record in records:
+                status = record['status'] or 'unknown'
+                count = int(record['count'])
+                percentage = float(record['percentage'])
+
+                data[status] = {
+                    "count": count,
+                    "percentage": percentage
+                }
+                total_orders = int(record['total'])
+
+            # Ensure common statuses exist (even if 0)
+            common_statuses = ['delivered',
+                               'in_progress', 'cancelled', 'pending']
+            for status in common_statuses:
+                if status not in data:
+                    data[status] = {
+                        "count": 0,
+                        "percentage": 0.0
+                    }
+
+            return {
+                "success": True,
+                "data": data,
+                "total_orders": total_orders
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get order status distribution: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ====================================================
+# --- Frontend Data API Endpoints ---
+# ====================================================
 
 @app.get("/orders")
 async def get_orders(
@@ -1174,12 +1387,12 @@ async def get_orders(
                 MATCH (c:Customer)-[:ORDERED]->(o:Order)
                 OPTIONAL MATCH (o)-[:CONTAINS]->(d:Dish)
             """
-
+            
             params = {}
             if status:
                 query += " WHERE o.status = $status"
                 params["status"] = status
-
+            
             query += """
                 WITH c, o, COLLECT({
                     dish_name: d.name,
@@ -1200,10 +1413,10 @@ async def get_orders(
                        c.location AS location
                 ORDER BY o.timestamp DESC
             """
-
+            
             result = session.run(query, **params)
             orders = []
-
+            
             for record in result:
                 order = {
                     "order_id": record["order_id"],
@@ -1216,13 +1429,13 @@ async def get_orders(
                     "location": record["location"]
                 }
                 orders.append(order)
-
+            
             return {
                 "success": True,
                 "orders": orders,
                 "total_count": len(orders)
             }
-
+            
     except Exception as e:
         logger.error(f"❌ Failed to get orders: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1252,21 +1465,21 @@ async def get_dishes(
                 OPTIONAL MATCH (r:Review)-[:RATES]->(d)
                 OPTIONAL MATCH (d)-[:CONTAINS_INGREDIENT]->(i:Ingredient)
             """
-
+            
             where_clauses = []
             params = {}
-
+            
             if cuisine:
                 where_clauses.append("toLower(d.cuisine) = toLower($cuisine)")
                 params["cuisine"] = cuisine
-
+            
             if type:
                 where_clauses.append("toLower(d.type) = toLower($type)")
                 params["type"] = type
-
+            
             if where_clauses:
                 query += " WHERE " + " AND ".join(where_clauses)
-
+            
             query += """
                 WITH d,
                      COUNT(DISTINCT o) AS order_count,
@@ -1282,7 +1495,7 @@ async def get_dishes(
                        review_count AS reviews,
                        ingredients
             """
-
+            
             # Add sorting
             if sort == "popularity":
                 query += " ORDER BY popularity DESC"
@@ -1294,10 +1507,10 @@ async def get_dishes(
                 query += " ORDER BY orders DESC"
             else:
                 query += " ORDER BY popularity DESC"
-
+            
             result = session.run(query, **params)
             dishes = []
-
+            
             for record in result:
                 dish = {
                     "dish_id": f"D{len(dishes) + 1:03d}",
@@ -1311,13 +1524,13 @@ async def get_dishes(
                     "ingredients": record["ingredients"]
                 }
                 dishes.append(dish)
-
+            
             return {
                 "success": True,
                 "dishes": dishes,
                 "total_count": len(dishes)
             }
-
+            
     except Exception as e:
         logger.error(f"❌ Failed to get dishes: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1340,12 +1553,12 @@ async def get_reviews(
             query = """
                 MATCH (c:Customer)-[:LEFT_REVIEW]->(r:Review)-[:RATES]->(d:Dish)
             """
-
+            
             params = {}
             if sentiment:
                 query += " WHERE toLower(r.sentiment) = toLower($sentiment)"
                 params["sentiment"] = sentiment
-
+            
             query += """
                 RETURN r.id AS review_id,
                        c.name AS customer_name,
@@ -1356,10 +1569,10 @@ async def get_reviews(
                        toString(r.timestamp) AS timestamp
                 ORDER BY r.timestamp DESC
             """
-
+            
             result = session.run(query, **params)
             reviews = []
-
+            
             for record in result:
                 review = {
                     "review_id": record["review_id"],
@@ -1371,7 +1584,7 @@ async def get_reviews(
                     "timestamp": record["timestamp"]
                 }
                 reviews.append(review)
-
+            
             # Get statistics
             stats_query = """
                 MATCH (r:Review)
@@ -1383,7 +1596,7 @@ async def get_reviews(
                 RETURN avg_rating, total, positive, neutral, negative
             """
             stats = session.run(stats_query).single()
-
+            
             return {
                 "success": True,
                 "reviews": reviews,
@@ -1395,7 +1608,7 @@ async def get_reviews(
                 },
                 "total_count": int(stats["total"] or 0)
             }
-
+            
     except Exception as e:
         logger.error(f"❌ Failed to get reviews: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1431,13 +1644,13 @@ async def get_customer_growth(
                        cumulative AS customers
                 ORDER BY month
             """
-
+            
             result = session.run(query, months=months)
             data = []
-
-            month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-
+            
+            month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+            
             for record in result:
                 month_str = record["month"]
                 month_num = int(month_str.split('-')[1])
@@ -1445,7 +1658,7 @@ async def get_customer_growth(
                     "month": month_names[month_num - 1],
                     "customers": int(record["customers"])
                 })
-
+            
             # If no data, generate sample data
             if not data:
                 base = 1000
@@ -1454,12 +1667,12 @@ async def get_customer_growth(
                         "month": month_names[(datetime.now().month - months + i) % 12],
                         "customers": base + (i * 150)
                     })
-
+            
             return {
                 "success": True,
                 "data": data
             }
-
+            
     except Exception as e:
         logger.error(f"❌ Failed to get customer growth: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1481,13 +1694,13 @@ async def get_order_heatmap(
                 RETURN hour, order_count
                 ORDER BY hour
             """
-
+            
             result = session.run(query)
             hour_data = {i: 0 for i in range(24)}
-
+            
             for record in result:
                 hour_data[int(record["hour"])] = int(record["order_count"])
-
+            
             data = []
             for hour in range(24):
                 if hour == 0:
@@ -1498,17 +1711,17 @@ async def get_order_heatmap(
                     hour_label = "12 PM"
                 else:
                     hour_label = f"{hour - 12} PM"
-
+                
                 data.append({
                     "hour": hour_label,
                     "orders": hour_data.get(hour, 0)
                 })
-
+            
             return {
                 "success": True,
                 "data": data
             }
-
+            
     except Exception as e:
         logger.error(f"❌ Failed to get order heatmap: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1539,10 +1752,10 @@ async def get_top_customers(
                 ORDER BY total_spent DESC
                 LIMIT $limit
             """
-
+            
             result = session.run(query, limit=limit)
             customers = []
-
+            
             for record in result:
                 customer = {
                     "name": record["name"],
@@ -1551,12 +1764,12 @@ async def get_top_customers(
                     "loyalty_score": int(record["loyalty_score"] or 0)
                 }
                 customers.append(customer)
-
+            
             return {
                 "success": True,
                 "customers": customers
             }
-
+            
     except Exception as e:
         logger.error(f"❌ Failed to get top customers: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1585,10 +1798,10 @@ async def get_dish_performance(
                 ORDER BY revenue DESC
                 LIMIT 20
             """
-
+            
             result = session.run(query)
             dishes = []
-
+            
             for record in result:
                 dish = {
                     "name": record["name"],
@@ -1596,12 +1809,12 @@ async def get_dish_performance(
                     "rating": round(float(record["rating"]), 1)
                 }
                 dishes.append(dish)
-
+            
             return {
                 "success": True,
                 "dishes": dishes
             }
-
+            
     except Exception as e:
         logger.error(f"❌ Failed to get dish performance: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1627,10 +1840,10 @@ async def get_cuisine_distribution(
                        cd.orders AS orders
                 ORDER BY orders DESC
             """
-
+            
             result = session.run(query)
             cuisines = []
-
+            
             for record in result:
                 cuisine = {
                     "name": record["name"],
@@ -1638,12 +1851,12 @@ async def get_cuisine_distribution(
                     "orders": int(record["orders"])
                 }
                 cuisines.append(cuisine)
-
+            
             return {
                 "success": True,
                 "cuisines": cuisines
             }
-
+            
     except Exception as e:
         logger.error(f"❌ Failed to get cuisine distribution: {e}")
         raise HTTPException(status_code=500, detail=str(e))
