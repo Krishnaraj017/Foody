@@ -1615,6 +1615,214 @@ async def get_stats_overview(current_user: str = Depends(get_current_user)):
         logger.error(f"❌ Failed to get stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Add these endpoints after the existing @app.get("/stats/overview") endpoint
+
+# ====================================================
+# --- Additional Analytics APIs ---
+# ====================================================
+
+
+@app.get("/stats/revenue-trend")
+async def get_revenue_trend(
+    days: int = 7,
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get revenue trend for the specified number of days
+    
+    Query Parameters:
+    - days: Number of days to return data for (default: 7)
+    
+    Returns daily revenue with date, day name, and amount
+    """
+    try:
+        # Calculate date range
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+
+        with get_neo4j_session() as session:
+            result = session.run("""
+                MATCH (o:Order)
+                WHERE o.timestamp >= datetime($start_date) 
+                  AND o.timestamp <= datetime($end_date)
+                WITH date(o.timestamp) AS order_date, 
+                     SUM(o.total_amount) AS daily_revenue
+                RETURN toString(order_date) AS date, 
+                       daily_revenue
+                ORDER BY order_date ASC
+            """,
+                                 start_date=start_date.isoformat(),
+                                 end_date=end_date.isoformat()
+                                 )
+
+            records = [dict(record) for record in result]
+
+            # Format data with day names
+            formatted_data = []
+            total_revenue = 0
+
+            for record in records:
+                date_obj = datetime.fromisoformat(record['date'])
+                day_name = date_obj.strftime('%a')  # Mon, Tue, Wed, etc.
+                revenue = float(record['daily_revenue'])
+
+                formatted_data.append({
+                    "date": record['date'],
+                    "day": day_name,
+                    "revenue": revenue
+                })
+                total_revenue += revenue
+
+            # Calculate average
+            average_daily_revenue = total_revenue / \
+                len(formatted_data) if formatted_data else 0
+
+            return {
+                "success": True,
+                "data": formatted_data,
+                "total_revenue": round(total_revenue, 2),
+                "average_daily_revenue": round(average_daily_revenue, 2),
+                "days_count": len(formatted_data)
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get revenue trend: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/top-dishes")
+async def get_top_dishes(
+    limit: int = 5,
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get top dishes by order count
+    
+    Query Parameters:
+    - limit: Number of top dishes to return (default: 5)
+    
+    Returns dishes with order count, revenue, and ratings
+    """
+    try:
+        with get_neo4j_session() as session:
+            # Get top dishes with order counts and revenue
+            dishes_result = session.run("""
+                MATCH (o:Order)-[:CONTAINS]->(d:Dish)
+                WITH d, 
+                     COUNT(o) AS order_count,
+                     d.price * COUNT(o) AS estimated_revenue
+                RETURN d.name AS name,
+                       d.type AS type,
+                       d.cuisine AS cuisine,
+                       d.price AS price,
+                       order_count,
+                       estimated_revenue,
+                       d.popularity_score AS popularity
+                ORDER BY order_count DESC
+                LIMIT $limit
+            """, limit=limit)
+
+            dishes = [dict(record) for record in dishes_result]
+
+            # Get ratings for these dishes
+            formatted_data = []
+            total_dishes_sold = 0
+
+            for dish in dishes:
+                # Get average rating for this dish
+                rating_result = session.run("""
+                    MATCH (r:Review)-[:RATES]->(d:Dish {name: $dish_name})
+                    RETURN AVG(r.rating) AS avg_rating, COUNT(r) AS review_count
+                """, dish_name=dish['name']).single()
+
+                avg_rating = float(
+                    rating_result['avg_rating'] or 0) if rating_result else 0
+                order_count = int(dish['order_count'])
+                total_dishes_sold += order_count
+
+                formatted_data.append({
+                    "name": dish['name'],
+                    "type": dish['type'],
+                    "cuisine": dish['cuisine'],
+                    "price": float(dish['price']),
+                    "orders": order_count,
+                    "revenue": round(float(dish['estimated_revenue']), 2),
+                    "rating": round(avg_rating, 1),
+                    "popularity_score": int(dish['popularity']) if dish['popularity'] else 0
+                })
+
+            return {
+                "success": True,
+                "data": formatted_data,
+                "total_dishes_sold": total_dishes_sold,
+                "limit": limit
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get top dishes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/order-status")
+async def get_order_status_distribution(
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get order status distribution
+    
+    Returns counts and percentages for each order status
+    """
+    try:
+        with get_neo4j_session() as session:
+            result = session.run("""
+                MATCH (o:Order)
+                WITH o.status AS status, COUNT(o) AS count
+                WITH collect({status: status, count: count}) AS status_data,
+                     SUM(count) AS total
+                UNWIND status_data AS sd
+                RETURN sd.status AS status,
+                       sd.count AS count,
+                       total,
+                       round(toFloat(sd.count) / toFloat(total) * 100, 1) AS percentage
+                ORDER BY count DESC
+            """)
+
+            records = [dict(record) for record in result]
+
+            # Format data
+            data = {}
+            total_orders = 0
+
+            for record in records:
+                status = record['status'] or 'unknown'
+                count = int(record['count'])
+                percentage = float(record['percentage'])
+
+                data[status] = {
+                    "count": count,
+                    "percentage": percentage
+                }
+                total_orders = int(record['total'])
+
+            # Ensure common statuses exist (even if 0)
+            common_statuses = ['delivered',
+                               'in_progress', 'cancelled', 'pending']
+            for status in common_statuses:
+                if status not in data:
+                    data[status] = {
+                        "count": 0,
+                        "percentage": 0.0
+                    }
+
+            return {
+                "success": True,
+                "data": data,
+                "total_orders": total_orders
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get order status distribution: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 # ====================================================
 # --- Debug Endpoints ---
 # ====================================================
