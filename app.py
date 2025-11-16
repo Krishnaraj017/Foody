@@ -3,6 +3,7 @@ import pandas as pd
 from fastapi import FastAPI, Body, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import StreamingResponse
 from langgraph.graph import StateGraph
 from langchain_groq import ChatGroq
 from neo4j import GraphDatabase
@@ -14,11 +15,12 @@ import re
 import secrets
 import hashlib
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Literal
+from typing import List, Dict, Optional, Literal, AsyncGenerator
 from typing_extensions import TypedDict
 from dotenv import load_dotenv
 from contextlib import contextmanager
 import logging
+import asyncio
 
 # ====================================================
 # --- Configure Logging ---
@@ -34,7 +36,7 @@ load_dotenv()
 app = FastAPI(
     title="Restaurant CRM Chatbot",
     description="Intelligent CRM assistant for restaurant management",
-    version="4.1.0"
+    version="4.2.0"
 )
 
 app.add_middleware(
@@ -48,16 +50,25 @@ app.add_middleware(
 security = HTTPBearer()
 
 # ====================================================
-# --- Initialize LLM (ChatGroq) ---
+# --- Initialize LLMs (Streaming and Non-Streaming) ---
 # ====================================================
 try:
+    # Non-streaming LLM for query generation
     llm = ChatGroq(
         model="llama-3.3-70b-versatile",
         api_key=os.getenv("GROQ_API_KEY"),
         temperature=0.3,
         streaming=False,
     )
-    logger.info("✅ LLM initialized successfully")
+
+    # Streaming LLM for final responses
+    llm_streaming = ChatGroq(
+        model="llama-3.3-70b-versatile",
+        api_key=os.getenv("GROQ_API_KEY"),
+        temperature=0.3,
+        streaming=True,
+    )
+    logger.info("✅ LLMs initialized successfully")
 except Exception as e:
     logger.error(f"❌ Failed to initialize LLM: {e}")
     raise
@@ -290,11 +301,9 @@ def execute_cypher_query(cypher_query: str, params: dict = None) -> List[Dict]:
             result = session.run(cypher_query, **(params or {}))
             logger.info("✅ Query executed successfully")
 
-            # Convert records and handle DateTime serialization
             records = []
             for record in result:
                 record_dict = dict(record)
-                # Convert Neo4j DateTime to ISO format strings
                 serializable_record = neo4j_to_json_serializable(record_dict)
                 records.append(serializable_record)
 
@@ -432,14 +441,12 @@ Be precise. Focus on the PRIMARY intent.
             f"🔍 Intent Details: {json.dumps(state['intent_details'], indent=2)}")
         logger.info(f"📈 Confidence: {data.get('confidence', 0)}%")
 
-        # Update user context
         user_context["last_interaction"] = user_input
         user_context["current_task"] = state["intent_type"]
         state["user_context"] = user_context
         save_user_context(state["user_id"], user_context)
         logger.info(f"💾 User context updated and saved")
 
-        # Handle unclear intent
         if state["intent_type"] == "unclear":
             clarification = data.get(
                 "suggested_clarification", "Could you please provide more details?")
@@ -488,7 +495,6 @@ def generate_query_or_action(state: State) -> State:
     logger.info(f"🎯 Intent Type: {intent_type}")
     logger.info(f"🔍 Intent Details: {json.dumps(intent_details, indent=2)}")
 
-    # Schema information
     schema_info = """
 **Neo4j Knowledge Graph Schema:**
 
@@ -541,94 +547,6 @@ You are generating Cypher queries for a restaurant CRM system.
    - For customers: name, id, email, phone, location, loyalty_score, join_date
    - For dishes: name, type, price, cuisine, category, description, popularity_score
    - For orders: order_id, toString(timestamp) AS timestamp, total_amount, status, delivery_time
-
-**CORRECTED Examples by Intent:**
-
-**ANALYTICS:**
-
-Query: "Show me total revenue for this month"
-{{
-  "requires_data": true,
-  "cypher_query": "MATCH (o:Order) WHERE o.timestamp >= datetime('2025-01-01T00:00:00') AND o.timestamp < datetime('2025-02-01T00:00:00') RETURN SUM(o.total_amount) AS total_revenue, COUNT(o) AS total_orders",
-  "query_explanation": "Calculates total revenue and order count for January 2025",
-  "expected_output": "Revenue sum and order count for the month",
-  "requires_action": false,
-  "action_type": null
-}}
-
-Query: "Which dishes generate the most revenue?"
-{{
-  "requires_data": true,
-  "cypher_query": "MATCH (o:Order)-[:CONTAINS]->(d:Dish) WITH d, COUNT(o) AS order_count, d.price AS price RETURN d.name AS dish, d.type AS type, d.cuisine AS cuisine, d.price AS price, order_count, (order_count * price) AS estimated_revenue ORDER BY estimated_revenue DESC LIMIT 10",
-  "query_explanation": "Calculates revenue by multiplying dish price by number of orders",
-  "expected_output": "List of dishes ranked by revenue contribution",
-  "requires_action": false,
-  "action_type": null
-}}
-
-Query: "Show me order trends over time"
-{{
-  "requires_data": true,
-  "cypher_query": "MATCH (o:Order) RETURN toString(o.timestamp) AS date, COUNT(o) AS orders, SUM(o.total_amount) AS revenue ORDER BY o.timestamp",
-  "query_explanation": "Groups orders by date with counts and revenue, converts timestamp to string for JSON",
-  "expected_output": "Time series of order activity",
-  "requires_action": false,
-  "action_type": null
-}}
-
-Query: "Show top selling dishes"
-{{
-  "requires_data": true,
-  "cypher_query": "MATCH (o:Order)-[:CONTAINS]->(d:Dish) RETURN d.name AS dish, d.type AS type, d.cuisine AS cuisine, d.price AS price, COUNT(o) AS orders ORDER BY orders DESC LIMIT 10",
-  "query_explanation": "Counts orders per dish and ranks by popularity",
-  "expected_output": "List of dishes with order counts",
-  "requires_action": false,
-  "action_type": null
-}}
-
-**CRM:**
-Query: "Tell me about customer Arjun Rao"
-{{
-  "requires_data": true,
-  "cypher_query": "MATCH (c:Customer) WHERE toLower(c.name) CONTAINS toLower('arjun') OPTIONAL MATCH (c)-[:ORDERED]->(o:Order) WITH c, COUNT(o) AS total_orders, SUM(o.total_amount) AS total_spent OPTIONAL MATCH (c)-[:PREFERS]->(d:Dish) RETURN c.name AS name, c.id AS id, c.email AS email, c.phone AS phone, c.location AS location, c.loyalty_score AS loyalty_score, c.join_date AS join_date, total_orders, total_spent, COLLECT(DISTINCT d.name) AS preferred_dishes LIMIT 5",
-  "query_explanation": "Gets customer profile with order history and preferences using case-insensitive search",
-  "expected_output": "Customer details with spending and preferences",
-  "requires_action": false,
-  "action_type": null
-}}
-
-**ORDER_MANAGEMENT:**
-Query: "Show recent orders"
-{{
-  "requires_data": true,
-  "cypher_query": "MATCH (c:Customer)-[:ORDERED]->(o:Order) RETURN c.name AS customer, o.order_id AS order_id, toString(o.timestamp) AS timestamp, o.total_amount AS amount, o.status AS status ORDER BY o.timestamp DESC LIMIT 20",
-  "query_explanation": "Lists recent orders with customer info, converts timestamp to string",
-  "expected_output": "Recent orders with details",
-  "requires_action": false,
-  "action_type": null
-}}
-
-**CUSTOMER_SERVICE:**
-Query: "Show negative reviews"
-{{
-  "requires_data": true,
-  "cypher_query": "MATCH (c:Customer)-[:LEFT_REVIEW]->(r:Review)-[:RATES]->(d:Dish) WHERE r.rating <= 3 RETURN c.name AS customer, d.name AS dish, r.rating AS rating, r.feedback_text AS feedback, toString(r.timestamp) AS timestamp ORDER BY r.timestamp DESC LIMIT 15",
-  "query_explanation": "Finds reviews with 3 stars or below, converts timestamp",
-  "expected_output": "List of negative/neutral reviews",
-  "requires_action": true,
-  "action_type": "follow_up_with_customers"
-}}
-
-**RECOMMENDATION:**
-Query: "Recommend vegan dishes"
-{{
-  "requires_data": true,
-  "cypher_query": "MATCH (d:Dish)-[:CONTAINS_INGREDIENT]->(i:Ingredient) WHERE d.type = 'veg' WITH d, COLLECT(i.is_vegan) AS vegan_flags WHERE ALL(flag IN vegan_flags WHERE flag = true) RETURN d.name AS dish, d.price AS price, d.cuisine AS cuisine, d.popularity_score AS popularity ORDER BY d.popularity_score DESC LIMIT 10",
-  "query_explanation": "Finds vegetarian dishes with all vegan ingredients",
-  "expected_output": "List of vegan-friendly dishes",
-  "requires_action": false,
-  "action_type": null
-}}
 
 Now generate the query for the user's question. Return ONLY valid JSON:
 {{
@@ -683,38 +601,21 @@ Remember:
     return state
 
 # ====================================================
-# --- Node 3: Execute Query & Format Response ---
+# --- Node 3: Execute Query (Non-streaming part) ---
 # ====================================================
 
 
-def execute_and_respond(state: State) -> State:
+def execute_query_only(state: State) -> State:
     """
-    Execute query and generate contextual response
+    Execute query and prepare data (no response generation)
     """
     logger.info("=" * 80)
-    logger.info("⚙️ STEP 3: EXECUTE QUERY AND RESPOND")
+    logger.info("⚙️ STEP 3A: EXECUTE QUERY")
     logger.info("=" * 80)
 
     intent_type = state["intent_type"]
     logger.info(f"🎯 Intent Type: {intent_type}")
     logger.info(f"🔍 Cypher Query: {state.get('cypher_query')}")
-
-    # Handle general/unclear intents
-    if intent_type == "general":
-        logger.info("💬 Handling general intent...")
-        state["output"] = generate_general_response(state)
-        state["messages"].append({"role": "user", "content": state["input"]})
-        state["messages"].append(
-            {"role": "assistant", "content": state["output"]})
-        save_conversation_history(state["user_id"], state["messages"])
-        logger.info(f"✅ General response generated")
-        logger.info("=" * 80)
-        return state
-
-    if intent_type == "unclear" and state.get("output"):
-        logger.info("⚠️ Intent unclear - already handled in classify_intent")
-        logger.info("=" * 80)
-        return state
 
     # Execute Cypher query if present
     if state.get("cypher_query"):
@@ -730,39 +631,150 @@ def execute_and_respond(state: State) -> State:
                 logger.info(
                     f"✅ Sample Result: {json.dumps(state['query_results'][0], indent=2)}")
 
-            if not query_results:
-                logger.info(
-                    "⚠️ No results found - generating no results response")
-                state["output"] = generate_no_results_response(state)
-            else:
-                logger.info("✅ Results found - generating contextual response")
-                state["output"] = generate_contextual_response(state)
-
         except Exception as e:
             logger.error(f"❌ Query execution failed: {e}")
             logger.error(f"❌ Exception type: {type(e).__name__}")
             logger.error(f"❌ Exception details: {str(e)}")
-            state["output"] = f"⚠️ I encountered an error while fetching the data: {str(e)}\n\nPlease try rephrasing your question."
             state["error"] = str(e)
             state["query_results"] = []
     else:
         logger.warning(
-            "⚠️ No Cypher query to execute - generating response without data")
-        # No query needed, generate response based on intent
+            "⚠️ No Cypher query to execute")
         state["query_results"] = []
-        state["output"] = generate_contextual_response(state)
 
-    logger.info(f"📝 Final Response Preview: {state['output'][:200]}...")
-
-    # Add to conversation history
-    state["messages"].append({"role": "user", "content": state["input"]})
-    state["messages"].append({"role": "assistant", "content": state["output"]})
-    save_conversation_history(state["user_id"], state["messages"])
-    logger.info(f"💾 Conversation history saved")
-
-    logger.info(f"✅ STEP 3 COMPLETED")
+    logger.info(f"✅ STEP 3A COMPLETED")
     logger.info("=" * 80)
     return state
+
+# ====================================================
+# --- Streaming Response Generator ---
+# ====================================================
+
+
+async def generate_streaming_response(state: State) -> AsyncGenerator[str, None]:
+    """
+    Generate streaming response using LLM
+    """
+    logger.info("=" * 80)
+    logger.info("⚙️ STEP 3B: GENERATE STREAMING RESPONSE")
+    logger.info("=" * 80)
+
+    intent_type = state["intent_type"]
+    query_results = state.get("query_results", [])
+    intent_details = state["intent_details"]
+    user_input = state["input"]
+
+    # Handle general intent
+    if intent_type == "general":
+        logger.info("💬 Handling general intent...")
+        response_text = generate_general_response(state)
+        # Stream the response character by character for consistency
+        for char in response_text:
+            yield json.dumps({"type": "token", "content": char}) + "\n"
+            await asyncio.sleep(0.01)  # Small delay for smooth streaming
+        yield json.dumps({"type": "done"}) + "\n"
+        return
+
+    # Handle unclear intent
+    if intent_type == "unclear" and state.get("output"):
+        logger.info("⚠️ Intent unclear - streaming clarification")
+        for char in state["output"]:
+            yield json.dumps({"type": "token", "content": char}) + "\n"
+            await asyncio.sleep(0.01)
+        yield json.dumps({"type": "done"}) + "\n"
+        return
+
+    # Handle no results
+    if state.get("cypher_query") and not query_results:
+        logger.info("⚠️ No results found - generating no results response")
+        response_text = generate_no_results_response(state)
+        for char in response_text:
+            yield json.dumps({"type": "token", "content": char}) + "\n"
+            await asyncio.sleep(0.01)
+        yield json.dumps({"type": "done"}) + "\n"
+        return
+
+    # Generate contextual response with streaming
+    prompt = f"""
+You are a friendly, professional restaurant CRM assistant. Generate a natural response.
+
+**Intent Type:** {intent_type}
+**What User Asked:** "{user_input}"
+**What We Found:** {intent_details.get('main_focus', '')}
+
+**Data Retrieved:**
+{json.dumps(query_results[:20], indent=2) if query_results else "No data available"}
+
+**Response Guidelines by Intent:**
+
+**ANALYTICS:** 
+- Start with key metrics and insights
+- Highlight trends and patterns
+- Use numbers and percentages
+- Format: "📊 Based on the data..."
+
+**CRM:**
+- Focus on customer insights
+- Personalization opportunities
+- Action items for engagement
+- Format: "👥 Here's what I found about your customers..."
+
+**ORDER_MANAGEMENT:**
+- Order status and details
+- Timeline information
+- Next steps if applicable
+- Format: "📦 Order Information..."
+
+**CUSTOMER_SERVICE:**
+- Sentiment and feedback summary
+- Priority issues
+- Actionable recommendations
+- Format: "⭐ Customer Feedback Summary..."
+
+**RECOMMENDATION:**
+- Top suggestions with reasoning
+- Dietary considerations
+- Popularity and ratings
+- Format: "🍽️ Based on your preferences..."
+
+**Requirements:**
+1. Be conversational and friendly
+2. Use appropriate emojis (but not excessively)
+3. Structure data clearly (bullets or numbered lists)
+4. Highlight actionable insights
+5. Keep it concise but informative
+6. Offer to provide more details if needed
+
+Generate the response in plain text (no JSON):
+"""
+
+    try:
+        logger.info("🤖 Starting streaming LLM response...")
+
+        # Stream tokens from LLM
+        full_response = ""
+        async for chunk in llm_streaming.astream(prompt):
+            if hasattr(chunk, 'content') and chunk.content:
+                token = chunk.content
+                full_response += token
+                yield json.dumps({"type": "token", "content": token}) + "\n"
+
+        # Save to history
+        state["output"] = full_response
+        state["messages"].append({"role": "user", "content": user_input})
+        state["messages"].append(
+            {"role": "assistant", "content": full_response})
+        save_conversation_history(state["user_id"], state["messages"])
+
+        logger.info(
+            f"✅ Streaming completed. Total length: {len(full_response)}")
+        yield json.dumps({"type": "done"}) + "\n"
+
+    except Exception as e:
+        logger.error(f"❌ Streaming response generation failed: {e}")
+        error_message = "⚠️ I encountered an error while generating the response. Please try again."
+        yield json.dumps({"type": "token", "content": error_message}) + "\n"
+        yield json.dumps({"type": "error", "message": str(e)}) + "\n"
 
 
 def generate_general_response(state: State) -> str:
@@ -820,78 +832,6 @@ I searched for: {state['intent_details'].get('main_focus', 'your query')}
 
 Need help? Just ask! 😊"""
 
-
-def generate_contextual_response(state: State) -> str:
-    """Generate natural, contextual response based on intent and results"""
-    intent_type = state["intent_type"]
-    query_results = state.get("query_results", [])
-    intent_details = state["intent_details"]
-
-    prompt = f"""
-You are a friendly, professional restaurant CRM assistant. Generate a natural response.
-
-**Intent Type:** {intent_type}
-**What User Asked:** "{state['input']}"
-**What We Found:** {intent_details.get('main_focus', '')}
-
-**Data Retrieved:**
-{json.dumps(query_results[:20], indent=2) if query_results else "No data available"}
-
-**Response Guidelines by Intent:**
-
-**ANALYTICS:** 
-- Start with key metrics and insights
-- Highlight trends and patterns
-- Use numbers and percentages
-- Format: "📊 Based on the data..."
-
-**CRM:**
-- Focus on customer insights
-- Personalization opportunities
-- Action items for engagement
-- Format: "👥 Here's what I found about your customers..."
-
-**ORDER_MANAGEMENT:**
-- Order status and details
-- Timeline information
-- Next steps if applicable
-- Format: "📦 Order Information..."
-
-**CUSTOMER_SERVICE:**
-- Sentiment and feedback summary
-- Priority issues
-- Actionable recommendations
-- Format: "⭐ Customer Feedback Summary..."
-
-**RECOMMENDATION:**
-- Top suggestions with reasoning
-- Dietary considerations
-- Popularity and ratings
-- Format: "🍽️ Based on your preferences..."
-
-**Requirements:**
-1. Be conversational and friendly
-2. Use appropriate emojis (but not excessively)
-3. Structure data clearly (bullets or numbered lists)
-4. Highlight actionable insights
-5. Keep it concise but informative
-6. Offer to provide more details if needed
-
-Generate the response in plain text (no JSON):
-"""
-
-    try:
-        response = llm.invoke(prompt).content.strip()
-        return response
-    except Exception as e:
-        logger.error(f"❌ Response generation failed: {e}")
-        # Fallback to basic formatting
-        if query_results:
-            return f"📊 Found {len(query_results)} results:\n\n" + "\n".join(
-                [f"• {json.dumps(r)}" for r in query_results[:10]]
-            )
-        return "I found some information but had trouble formatting it. Please try rephrasing your question."
-
 # ====================================================
 # --- Graph Definition ---
 # ====================================================
@@ -900,11 +840,9 @@ Generate the response in plain text (no JSON):
 graph = StateGraph(State)
 graph.add_node("classify_intent", classify_intent)
 graph.add_node("generate_query_or_action", generate_query_or_action)
-graph.add_node("execute_and_respond", execute_and_respond)
+graph.add_node("execute_query_only", execute_query_only)
 
 graph.set_entry_point("classify_intent")
-
-# Conditional routing based on intent
 
 
 def should_generate_query(state: State) -> str:
@@ -917,17 +855,14 @@ def should_generate_query(state: State) -> str:
     logger.info(f"   Has Output: {has_output}")
     logger.info(f"   Output Value: {state.get('output')}")
 
-    # If unclear intent already has clarification response, skip to execute
     if intent_type == "unclear" and has_output:
         logger.info(f"   ➡️ ROUTE: execute (unclear with output)")
         return "execute"
 
-    # If general intent, skip to execute
     if intent_type == "general":
         logger.info(f"   ➡️ ROUTE: execute (general intent)")
         return "execute"
 
-    # For all other intents (analytics, crm, order_management, etc), generate query
     logger.info(f"   ➡️ ROUTE: generate (needs query generation)")
     return "generate"
 
@@ -937,11 +872,11 @@ graph.add_conditional_edges(
     should_generate_query,
     {
         "generate": "generate_query_or_action",
-        "execute": "execute_and_respond"
+        "execute": "execute_query_only"
     }
 )
 
-graph.add_edge("generate_query_or_action", "execute_and_respond")
+graph.add_edge("generate_query_or_action", "execute_query_only")
 
 app_graph = graph.compile()
 
@@ -1006,7 +941,7 @@ async def logout(current_user: str = Depends(get_current_user)):
     return {"success": True, "message": "Logged out successfully"}
 
 # ====================================================
-# --- Main Chat Endpoint ---
+# --- Main Chat Endpoints (Streaming & Non-Streaming) ---
 # ====================================================
 
 
@@ -1015,9 +950,101 @@ async def root():
     return {
         "status": "online",
         "service": "Restaurant CRM Chatbot",
-        "version": "4.1.0",
-        "description": "Intelligent CRM assistant for restaurant management - Updated with DateTime fixes"
+        "version": "4.2.0",
+        "description": "Intelligent CRM assistant with streaming support",
+        "endpoints": {
+            "streaming": "/chat/stream",
+            "non_streaming": "/chat"
+        }
     }
+
+
+@app.post("/chat/stream")
+async def chat_stream(
+    message: str = Body(..., embed=True),
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Streaming chat endpoint - returns Server-Sent Events (SSE) format
+    
+    Frontend should handle:
+    - type: "token" - Each token/chunk of response
+    - type: "done" - Response completed
+    - type: "error" - Error occurred
+    - type: "metadata" - Additional info (intent, query, etc.)
+    """
+    logger.info("\n" + "=" * 100)
+    logger.info("🚀 NEW STREAMING CHAT REQUEST")
+    logger.info("=" * 100)
+    logger.info(f"👤 User ID: {current_user}")
+    logger.info(f"💬 Message: {message}")
+
+    if not message or not message.strip():
+        logger.error("❌ Empty message received")
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    async def event_stream():
+        try:
+            # Get conversation context
+            history = get_conversation_history(current_user)
+            user_context = get_user_context(current_user)
+
+            # Initialize state
+            state = {
+                "input": message.strip(),
+                "user_id": current_user,
+                "messages": history,
+                "user_context": user_context,
+                "intent_type": "unclear",
+                "intent_details": {},
+                "cypher_query": None,
+                "query_results": [],
+                "requires_action": False,
+                "action_type": None,
+                "output": "",
+                "error": None
+            }
+
+            # Execute non-streaming parts (intent classification & query execution)
+            logger.info("🎬 Executing non-streaming workflow steps...")
+            result = app_graph.invoke(state)
+
+            # Send metadata first
+            metadata = {
+                "type": "metadata",
+                "intent_type": result["intent_type"],
+                "intent_details": result.get("intent_details", {}),
+                "cypher_query": result.get("cypher_query"),
+                "results_count": len(result.get("query_results", [])),
+                "requires_action": result.get("requires_action", False),
+                "action_type": result.get("action_type")
+            }
+            yield json.dumps(metadata) + "\n"
+
+            # Stream the response
+            logger.info("🌊 Starting response streaming...")
+            async for chunk in generate_streaming_response(result):
+                yield chunk
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"❌ Streaming failed: {e}")
+            error_data = {
+                "type": "error",
+                "message": str(e)
+            }
+            yield json.dumps(error_data) + "\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable buffering for nginx
+        }
+    )
 
 
 @app.post("/chat")
@@ -1026,10 +1053,10 @@ async def chat(
     current_user: str = Depends(get_current_user)
 ):
     """
-    Enhanced chat endpoint with multi-intent support and DateTime handling
+    Non-streaming chat endpoint (original functionality preserved)
     """
     logger.info("\n" + "=" * 100)
-    logger.info("🚀 NEW CHAT REQUEST")
+    logger.info("🚀 NEW CHAT REQUEST (NON-STREAMING)")
     logger.info("=" * 100)
     logger.info(f"👤 User ID: {current_user}")
     logger.info(f"💬 Message: {message}")
@@ -1040,11 +1067,7 @@ async def chat(
 
     try:
         history = get_conversation_history(current_user)
-        logger.info(
-            f"📚 Retrieved conversation history: {len(history)} messages")
-
         user_context = get_user_context(current_user)
-        logger.info(f"👤 User context: {json.dumps(user_context, indent=2)}")
 
         state = {
             "input": message.strip(),
@@ -1061,22 +1084,40 @@ async def chat(
             "error": None
         }
 
-        logger.info("🔄 Initial state created")
-        logger.info(f"📊 State keys: {list(state.keys())}")
-
-        logger.info("🎬 Invoking LangGraph workflow...")
+        # Execute workflow
         result = app_graph.invoke(state)
-        logger.info("✅ LangGraph workflow completed")
 
-        # Ensure query_results is always a list
+        # Generate non-streaming response
+        if not result.get("output"):
+            # Generate response if not already set
+            intent_type = result["intent_type"]
+            if intent_type == "general":
+                result["output"] = generate_general_response(result)
+            elif intent_type == "unclear":
+                pass  # Already set in classify_intent
+            elif result.get("cypher_query") and not result.get("query_results"):
+                result["output"] = generate_no_results_response(result)
+            else:
+                # Generate contextual response (non-streaming)
+                prompt = f"""
+You are a friendly, professional restaurant CRM assistant. Generate a natural response.
+
+**Intent Type:** {result["intent_type"]}
+**What User Asked:** "{message}"
+**Data Retrieved:**
+{json.dumps(result.get("query_results", [])[:20], indent=2)}
+
+Generate a concise, helpful response.
+"""
+                result["output"] = llm.invoke(prompt).content.strip()
+
+        # Save to history
+        result["messages"].append({"role": "user", "content": message})
+        result["messages"].append(
+            {"role": "assistant", "content": result["output"]})
+        save_conversation_history(current_user, result["messages"])
+
         query_results = result.get("query_results") or []
-
-        logger.info("📤 FINAL RESPONSE:")
-        logger.info(f"✅ Success: True")
-        logger.info(f"💬 Response: {result['output'][:200]}...")
-        logger.info(f"🎯 Intent Type: {result['intent_type']}")
-        logger.info(f"🔍 Cypher Query: {result.get('cypher_query')}")
-        logger.info(f"📊 Results Count: {len(query_results)}")
 
         response = {
             "success": True,
@@ -1089,21 +1130,12 @@ async def chat(
             "action_type": result.get("action_type")
         }
 
-        logger.info("=" * 100)
-        logger.info("✅ CHAT REQUEST COMPLETED SUCCESSFULLY")
-        logger.info("=" * 100 + "\n")
-
         return response
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("=" * 100)
-        logger.error(f"❌ CHAT REQUEST FAILED")
-        logger.error(f"❌ Exception type: {type(e).__name__}")
-        logger.error(f"❌ Exception message: {str(e)}")
-        logger.error(f"❌ Full traceback:", exc_info=True)
-        logger.error("=" * 100 + "\n")
+        logger.error(f"❌ CHAT REQUEST FAILED: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1120,9 +1152,506 @@ async def clear_history(current_user: str = Depends(get_current_user)):
     return {"success": True, "message": "History cleared"}
 
 # ====================================================
-# --- Setup & Bulk Data Upload Endpoints ---
+# --- Frontend Data API Endpoints ---
 # ====================================================
 
+
+@app.get("/orders")
+async def get_orders(
+    status: Optional[str] = None,
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get orders list with optional status filter
+    
+    Query Parameters:
+    - status: Filter by status ("delivered", "in-progress", "cancelled")
+    """
+    try:
+        with get_neo4j_session() as session:
+            # Build query with optional status filter
+            query = """
+                MATCH (c:Customer)-[:ORDERED]->(o:Order)
+                OPTIONAL MATCH (o)-[:CONTAINS]->(d:Dish)
+            """
+
+            params = {}
+            if status:
+                query += " WHERE o.status = $status"
+                params["status"] = status
+
+            query += """
+                WITH c, o, COLLECT({
+                    dish_name: d.name,
+                    quantity: 1,
+                    price: d.price
+                }) AS items
+                RETURN o.order_id AS order_id,
+                       c.name AS customer_name,
+                       items,
+                       o.total_amount AS total_amount,
+                       o.status AS status,
+                       toString(o.timestamp) AS timestamp,
+                       CASE 
+                           WHEN o.delivery_time IS NOT NULL 
+                           THEN toString(o.delivery_time) + ' mins'
+                           ELSE 'Pending'
+                       END AS delivery_time,
+                       c.location AS location
+                ORDER BY o.timestamp DESC
+            """
+
+            result = session.run(query, **params)
+            orders = []
+
+            for record in result:
+                order = {
+                    "order_id": record["order_id"],
+                    "customer_name": record["customer_name"],
+                    "items": [item for item in record["items"] if item["dish_name"]],
+                    "total_amount": float(record["total_amount"]),
+                    "status": record["status"],
+                    "timestamp": record["timestamp"],
+                    "delivery_time": record["delivery_time"],
+                    "location": record["location"]
+                }
+                orders.append(order)
+
+            return {
+                "success": True,
+                "orders": orders,
+                "total_count": len(orders)
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get orders: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/dishes")
+async def get_dishes(
+    cuisine: Optional[str] = None,
+    type: Optional[str] = None,
+    sort: Optional[str] = None,
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get dishes catalog with filters and sorting
+    
+    Query Parameters:
+    - cuisine: Filter by cuisine type
+    - type: Filter by "veg" or "non-veg"
+    - sort: Sort by "popularity", "price-low", "price-high", "orders"
+    """
+    try:
+        with get_neo4j_session() as session:
+            # Build query with filters
+            query = """
+                MATCH (d:Dish)
+                OPTIONAL MATCH (o:Order)-[:CONTAINS]->(d)
+                OPTIONAL MATCH (r:Review)-[:RATES]->(d)
+                OPTIONAL MATCH (d)-[:CONTAINS_INGREDIENT]->(i:Ingredient)
+            """
+
+            where_clauses = []
+            params = {}
+
+            if cuisine:
+                where_clauses.append("toLower(d.cuisine) = toLower($cuisine)")
+                params["cuisine"] = cuisine
+
+            if type:
+                where_clauses.append("toLower(d.type) = toLower($type)")
+                params["type"] = type
+
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
+
+            query += """
+                WITH d,
+                     COUNT(DISTINCT o) AS order_count,
+                     COUNT(DISTINCT r) AS review_count,
+                     AVG(r.rating) AS avg_rating,
+                     COLLECT(DISTINCT i.name) AS ingredients
+                RETURN d.name AS name,
+                       d.cuisine AS cuisine,
+                       d.type AS type,
+                       d.price AS price,
+                       COALESCE(avg_rating, d.popularity_score / 20.0, 0) AS popularity,
+                       order_count AS orders,
+                       review_count AS reviews,
+                       ingredients
+            """
+
+            # Add sorting
+            if sort == "popularity":
+                query += " ORDER BY popularity DESC"
+            elif sort == "price-low":
+                query += " ORDER BY price ASC"
+            elif sort == "price-high":
+                query += " ORDER BY price DESC"
+            elif sort == "orders":
+                query += " ORDER BY orders DESC"
+            else:
+                query += " ORDER BY popularity DESC"
+
+            result = session.run(query, **params)
+            dishes = []
+
+            for record in result:
+                dish = {
+                    "dish_id": f"D{len(dishes) + 1:03d}",
+                    "name": record["name"],
+                    "cuisine": record["cuisine"],
+                    "type": record["type"],
+                    "price": float(record["price"]),
+                    "popularity": round(float(record["popularity"]), 1),
+                    "orders": int(record["orders"]),
+                    "reviews": int(record["reviews"]),
+                    "ingredients": record["ingredients"]
+                }
+                dishes.append(dish)
+
+            return {
+                "success": True,
+                "dishes": dishes,
+                "total_count": len(dishes)
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get dishes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/reviews")
+async def get_reviews(
+    sentiment: Optional[str] = None,
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get customer reviews with optional sentiment filter
+    
+    Query Parameters:
+    - sentiment: Filter by "positive", "neutral", "negative"
+    """
+    try:
+        with get_neo4j_session() as session:
+            # Build query with optional sentiment filter
+            query = """
+                MATCH (c:Customer)-[:LEFT_REVIEW]->(r:Review)-[:RATES]->(d:Dish)
+            """
+
+            params = {}
+            if sentiment:
+                query += " WHERE toLower(r.sentiment) = toLower($sentiment)"
+                params["sentiment"] = sentiment
+
+            query += """
+                RETURN r.id AS review_id,
+                       c.name AS customer_name,
+                       d.name AS dish_name,
+                       r.rating AS rating,
+                       r.sentiment AS sentiment,
+                       r.feedback_text AS feedback,
+                       toString(r.timestamp) AS timestamp
+                ORDER BY r.timestamp DESC
+            """
+
+            result = session.run(query, **params)
+            reviews = []
+
+            for record in result:
+                review = {
+                    "review_id": record["review_id"],
+                    "customer_name": record["customer_name"],
+                    "dish_name": record["dish_name"],
+                    "rating": int(record["rating"]),
+                    "sentiment": record["sentiment"],
+                    "feedback": record["feedback"],
+                    "timestamp": record["timestamp"]
+                }
+                reviews.append(review)
+
+            # Get statistics
+            stats_query = """
+                MATCH (r:Review)
+                WITH AVG(r.rating) AS avg_rating,
+                     COUNT(r) AS total,
+                     SUM(CASE WHEN toLower(r.sentiment) = 'positive' THEN 1 ELSE 0 END) AS positive,
+                     SUM(CASE WHEN toLower(r.sentiment) = 'neutral' THEN 1 ELSE 0 END) AS neutral,
+                     SUM(CASE WHEN toLower(r.sentiment) = 'negative' THEN 1 ELSE 0 END) AS negative
+                RETURN avg_rating, total, positive, neutral, negative
+            """
+            stats = session.run(stats_query).single()
+
+            return {
+                "success": True,
+                "reviews": reviews,
+                "average_rating": round(float(stats["avg_rating"] or 0), 1),
+                "sentiment_counts": {
+                    "positive": int(stats["positive"] or 0),
+                    "neutral": int(stats["neutral"] or 0),
+                    "negative": int(stats["negative"] or 0)
+                },
+                "total_count": int(stats["total"] or 0)
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get reviews: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/analytics/customer-growth")
+async def get_customer_growth(
+    months: int = 6,
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get customer growth trend over specified months
+    
+    Query Parameters:
+    - months: Number of months (default: 6)
+    """
+    try:
+        with get_neo4j_session() as session:
+            query = """
+                MATCH (c:Customer)
+                WHERE c.join_date IS NOT NULL
+                WITH c, date(c.join_date) AS join_date
+                WHERE join_date >= date() - duration({months: $months})
+                WITH date.truncate('month', join_date) AS month, COUNT(c) AS new_customers
+                WITH month, new_customers
+                ORDER BY month
+                WITH COLLECT({month: month, new: new_customers}) AS monthly_data
+                UNWIND range(0, size(monthly_data)-1) AS idx
+                WITH monthly_data[idx] AS current,
+                     REDUCE(total = 0, i IN range(0, idx) | 
+                         total + monthly_data[i].new) + monthly_data[idx].new AS cumulative
+                RETURN toString(current.month)[0..7] AS month,
+                       cumulative AS customers
+                ORDER BY month
+            """
+
+            result = session.run(query, months=months)
+            data = []
+
+            month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+            for record in result:
+                month_str = record["month"]
+                month_num = int(month_str.split('-')[1])
+                data.append({
+                    "month": month_names[month_num - 1],
+                    "customers": int(record["customers"])
+                })
+
+            # If no data, generate sample data
+            if not data:
+                base = 1000
+                for i in range(months):
+                    data.append({
+                        "month": month_names[(datetime.now().month - months + i) % 12],
+                        "customers": base + (i * 150)
+                    })
+
+            return {
+                "success": True,
+                "data": data
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get customer growth: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/analytics/order-heatmap")
+async def get_order_heatmap(
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get order heatmap by hour of day
+    """
+    try:
+        with get_neo4j_session() as session:
+            query = """
+                MATCH (o:Order)
+                WHERE o.timestamp IS NOT NULL
+                WITH o.timestamp.hour AS hour, COUNT(o) AS order_count
+                RETURN hour, order_count
+                ORDER BY hour
+            """
+
+            result = session.run(query)
+            hour_data = {i: 0 for i in range(24)}
+
+            for record in result:
+                hour_data[int(record["hour"])] = int(record["order_count"])
+
+            data = []
+            for hour in range(24):
+                if hour == 0:
+                    hour_label = "12 AM"
+                elif hour < 12:
+                    hour_label = f"{hour} AM"
+                elif hour == 12:
+                    hour_label = "12 PM"
+                else:
+                    hour_label = f"{hour - 12} PM"
+
+                data.append({
+                    "hour": hour_label,
+                    "orders": hour_data.get(hour, 0)
+                })
+
+            return {
+                "success": True,
+                "data": data
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get order heatmap: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/analytics/top-customers")
+async def get_top_customers(
+    limit: int = 10,
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get top customers by orders and spending
+    
+    Query Parameters:
+    - limit: Number of customers to return (default: 10)
+    """
+    try:
+        with get_neo4j_session() as session:
+            query = """
+                MATCH (c:Customer)-[:ORDERED]->(o:Order)
+                WITH c,
+                     COUNT(o) AS order_count,
+                     SUM(o.total_amount) AS total_spent
+                RETURN c.name AS name,
+                       order_count AS orders,
+                       total_spent AS spent,
+                       c.loyalty_score AS loyalty_score
+                ORDER BY total_spent DESC
+                LIMIT $limit
+            """
+
+            result = session.run(query, limit=limit)
+            customers = []
+
+            for record in result:
+                customer = {
+                    "name": record["name"],
+                    "orders": int(record["orders"]),
+                    "spent": round(float(record["spent"]), 2),
+                    "loyalty_score": int(record["loyalty_score"] or 0)
+                }
+                customers.append(customer)
+
+            return {
+                "success": True,
+                "customers": customers
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get top customers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/analytics/dish-performance")
+async def get_dish_performance(
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get dish performance (revenue vs rating)
+    """
+    try:
+        with get_neo4j_session() as session:
+            query = """
+                MATCH (d:Dish)
+                OPTIONAL MATCH (o:Order)-[:CONTAINS]->(d)
+                OPTIONAL MATCH (r:Review)-[:RATES]->(d)
+                WITH d,
+                     COUNT(DISTINCT o) AS order_count,
+                     AVG(r.rating) AS avg_rating
+                WHERE order_count > 0
+                RETURN d.name AS name,
+                       (order_count * d.price) AS revenue,
+                       COALESCE(avg_rating, 0) AS rating
+                ORDER BY revenue DESC
+                LIMIT 20
+            """
+
+            result = session.run(query)
+            dishes = []
+
+            for record in result:
+                dish = {
+                    "name": record["name"],
+                    "revenue": round(float(record["revenue"]), 2),
+                    "rating": round(float(record["rating"]), 1)
+                }
+                dishes.append(dish)
+
+            return {
+                "success": True,
+                "dishes": dishes
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get dish performance: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/analytics/cuisine-distribution")
+async def get_cuisine_distribution(
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Get cuisine distribution by orders
+    """
+    try:
+        with get_neo4j_session() as session:
+            query = """
+                MATCH (o:Order)-[:CONTAINS]->(d:Dish)
+                WITH d.cuisine AS cuisine, COUNT(o) AS order_count
+                WITH COLLECT({cuisine: cuisine, orders: order_count}) AS cuisine_data,
+                     SUM(order_count) AS total_orders
+                UNWIND cuisine_data AS cd
+                RETURN cd.cuisine AS name,
+                       round(toFloat(cd.orders) / toFloat(total_orders) * 100, 1) AS percentage,
+                       cd.orders AS orders
+                ORDER BY orders DESC
+            """
+
+            result = session.run(query)
+            cuisines = []
+
+            for record in result:
+                cuisine = {
+                    "name": record["name"],
+                    "percentage": float(record["percentage"]),
+                    "orders": int(record["orders"])
+                }
+                cuisines.append(cuisine)
+
+            return {
+                "success": True,
+                "cuisines": cuisines
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get cuisine distribution: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ====================================================
+# --- Setup & Bulk Data Upload Endpoints ---
+# ====================================================
 
 @app.post("/setup/initialize-schema")
 async def initialize_schema(current_user: str = Depends(get_current_user)):
@@ -1566,267 +2095,10 @@ async def get_data_stats(current_user: str = Depends(get_current_user)):
         logger.error(f"❌ Failed to get stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ====================================================
-# --- Analytics & Stats Routes ---
-# ====================================================
 
-
-@app.get("/stats/overview")
-async def get_stats_overview(current_user: str = Depends(get_current_user)):
-    """Get overall restaurant statistics"""
-    try:
-        with get_neo4j_session() as session:
-            result = session.run("""
-                MATCH (d:Dish) WITH count(d) AS dishes
-                MATCH (c:Customer) WITH dishes, count(c) AS customers
-                MATCH (o:Order) WITH dishes, customers, count(o) AS orders
-                MATCH (r:Review) WITH dishes, customers, orders, count(r) AS reviews
-                MATCH (i:Ingredient) WITH dishes, customers, orders, reviews, count(i) AS ingredients
-                RETURN dishes, customers, orders, reviews, ingredients
-            """).single()
-
-            revenue_result = session.run("""
-                MATCH (o:Order)
-                RETURN SUM(o.total_amount) AS total_revenue,
-                       AVG(o.total_amount) AS avg_order_value,
-                       COUNT(o) AS total_orders
-            """).single()
-
-            rating_result = session.run("""
-                MATCH (r:Review)
-                RETURN AVG(r.rating) AS avg_rating,
-                       COUNT(r) AS total_reviews
-            """).single()
-
-        return {
-            "success": True,
-            "statistics": {
-                "total_dishes": result["dishes"] if result else 0,
-                "total_customers": result["customers"] if result else 0,
-                "total_orders": result["orders"] if result else 0,
-                "total_reviews": result["reviews"] if result else 0,
-                "total_ingredients": result["ingredients"] if result else 0,
-                "total_revenue": float(revenue_result["total_revenue"] or 0),
-                "avg_order_value": float(revenue_result["avg_order_value"] or 0),
-                "avg_rating": float(rating_result["avg_rating"] or 0)
-            }
-        }
-    except Exception as e:
-        logger.error(f"❌ Failed to get stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Add these endpoints after the existing @app.get("/stats/overview") endpoint
-
-# ====================================================
-# --- Additional Analytics APIs ---
-# ====================================================
-
-
-@app.get("/stats/revenue-trend")
-async def get_revenue_trend(
-    days: int = 7,
-    current_user: str = Depends(get_current_user)
-):
-    """
-    Get revenue trend for the specified number of days
-    
-    Query Parameters:
-    - days: Number of days to return data for (default: 7)
-    
-    Returns daily revenue with date, day name, and amount
-    """
-    try:
-        # Calculate date range
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days)
-
-        with get_neo4j_session() as session:
-            result = session.run("""
-                MATCH (o:Order)
-                WHERE o.timestamp >= datetime($start_date) 
-                  AND o.timestamp <= datetime($end_date)
-                WITH date(o.timestamp) AS order_date, 
-                     SUM(o.total_amount) AS daily_revenue
-                RETURN toString(order_date) AS date, 
-                       daily_revenue
-                ORDER BY order_date ASC
-            """,
-                                 start_date=start_date.isoformat(),
-                                 end_date=end_date.isoformat()
-                                 )
-
-            records = [dict(record) for record in result]
-
-            # Format data with day names
-            formatted_data = []
-            total_revenue = 0
-
-            for record in records:
-                date_obj = datetime.fromisoformat(record['date'])
-                day_name = date_obj.strftime('%a')  # Mon, Tue, Wed, etc.
-                revenue = float(record['daily_revenue'])
-
-                formatted_data.append({
-                    "date": record['date'],
-                    "day": day_name,
-                    "revenue": revenue
-                })
-                total_revenue += revenue
-
-            # Calculate average
-            average_daily_revenue = total_revenue / \
-                len(formatted_data) if formatted_data else 0
-
-            return {
-                "success": True,
-                "data": formatted_data,
-                "total_revenue": round(total_revenue, 2),
-                "average_daily_revenue": round(average_daily_revenue, 2),
-                "days_count": len(formatted_data)
-            }
-
-    except Exception as e:
-        logger.error(f"❌ Failed to get revenue trend: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/stats/top-dishes")
-async def get_top_dishes(
-    limit: int = 5,
-    current_user: str = Depends(get_current_user)
-):
-    """
-    Get top dishes by order count
-    
-    Query Parameters:
-    - limit: Number of top dishes to return (default: 5)
-    
-    Returns dishes with order count, revenue, and ratings
-    """
-    try:
-        with get_neo4j_session() as session:
-            # Get top dishes with order counts and revenue
-            dishes_result = session.run("""
-                MATCH (o:Order)-[:CONTAINS]->(d:Dish)
-                WITH d, 
-                     COUNT(o) AS order_count,
-                     d.price * COUNT(o) AS estimated_revenue
-                RETURN d.name AS name,
-                       d.type AS type,
-                       d.cuisine AS cuisine,
-                       d.price AS price,
-                       order_count,
-                       estimated_revenue,
-                       d.popularity_score AS popularity
-                ORDER BY order_count DESC
-                LIMIT $limit
-            """, limit=limit)
-
-            dishes = [dict(record) for record in dishes_result]
-
-            # Get ratings for these dishes
-            formatted_data = []
-            total_dishes_sold = 0
-
-            for dish in dishes:
-                # Get average rating for this dish
-                rating_result = session.run("""
-                    MATCH (r:Review)-[:RATES]->(d:Dish {name: $dish_name})
-                    RETURN AVG(r.rating) AS avg_rating, COUNT(r) AS review_count
-                """, dish_name=dish['name']).single()
-
-                avg_rating = float(
-                    rating_result['avg_rating'] or 0) if rating_result else 0
-                order_count = int(dish['order_count'])
-                total_dishes_sold += order_count
-
-                formatted_data.append({
-                    "name": dish['name'],
-                    "type": dish['type'],
-                    "cuisine": dish['cuisine'],
-                    "price": float(dish['price']),
-                    "orders": order_count,
-                    "revenue": round(float(dish['estimated_revenue']), 2),
-                    "rating": round(avg_rating, 1),
-                    "popularity_score": int(dish['popularity']) if dish['popularity'] else 0
-                })
-
-            return {
-                "success": True,
-                "data": formatted_data,
-                "total_dishes_sold": total_dishes_sold,
-                "limit": limit
-            }
-
-    except Exception as e:
-        logger.error(f"❌ Failed to get top dishes: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/stats/order-status")
-async def get_order_status_distribution(
-    current_user: str = Depends(get_current_user)
-):
-    """
-    Get order status distribution
-    
-    Returns counts and percentages for each order status
-    """
-    try:
-        with get_neo4j_session() as session:
-            result = session.run("""
-                MATCH (o:Order)
-                WITH o.status AS status, COUNT(o) AS count
-                WITH collect({status: status, count: count}) AS status_data,
-                     SUM(count) AS total
-                UNWIND status_data AS sd
-                RETURN sd.status AS status,
-                       sd.count AS count,
-                       total,
-                       round(toFloat(sd.count) / toFloat(total) * 100, 1) AS percentage
-                ORDER BY count DESC
-            """)
-
-            records = [dict(record) for record in result]
-
-            # Format data
-            data = {}
-            total_orders = 0
-
-            for record in records:
-                status = record['status'] or 'unknown'
-                count = int(record['count'])
-                percentage = float(record['percentage'])
-
-                data[status] = {
-                    "count": count,
-                    "percentage": percentage
-                }
-                total_orders = int(record['total'])
-
-            # Ensure common statuses exist (even if 0)
-            common_statuses = ['delivered',
-                               'in_progress', 'cancelled', 'pending']
-            for status in common_statuses:
-                if status not in data:
-                    data[status] = {
-                        "count": 0,
-                        "percentage": 0.0
-                    }
-
-            return {
-                "success": True,
-                "data": data,
-                "total_orders": total_orders
-            }
-
-    except Exception as e:
-        logger.error(f"❌ Failed to get order status distribution: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 # ====================================================
 # --- Debug Endpoints ---
 # ====================================================
-
 
 @app.get("/debug/customers")
 async def debug_customers(current_user: str = Depends(get_current_user)):
